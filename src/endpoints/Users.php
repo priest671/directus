@@ -25,7 +25,7 @@ class Users extends Route
         $app->post('', [$this, 'create']);
         $app->get('/{id}', [$this, 'read']);
         $app->post('/invite', [$this, 'invite']);
-        $app->post('/invite/{token}', [$this, 'acceptInvitation']);
+        $app->map(['GET', 'POST'], '/invite/{token}', [$this, 'acceptInvitation']);
         $app->patch('/{id}', [$this, 'update']);
         $app->delete('/{id}', [$this, 'delete']);
 
@@ -35,6 +35,9 @@ class Users extends Route
 
         // Tracking
         $app->patch('/{id}/tracking/page', [$this, 'trackPage']);
+
+        // Enable 2FA
+        $app->post('/{id}/activate2FA', [$this, 'activate2FA']);
     }
 
     /**
@@ -207,13 +210,31 @@ class Users extends Route
      */
     public function acceptInvitation(Request $request, Response $response)
     {
-        $this->validateRequestPayload($request);
-
         $service = new UsersService($this->container);
         $responseData = $service->enableUserWithInvitation(
-            $request->getParsedBodyParam('token')
+            $request->getAttribute('token')
         );
 
         return $this->responseWithData($request, $response, $responseData);
     }
+
+    /**
+     * @param Request $request
+     * @param Response $response
+     *
+     * @return Response
+     */
+    public function activate2FA(Request $request, Response $response)
+    {
+        $this->validateRequestPayload($request);
+        $service = new UsersService($this->container);
+        $responseData = $service->activate2FA(
+            $request->getAttribute('id'),
+            $request->getParsedBodyParam('tfa_secret'),
+            $request->getParsedBodyParam('otp')
+        );
+
+        return $this->responseWithData($request, $response, $responseData);
+    }
+
 }

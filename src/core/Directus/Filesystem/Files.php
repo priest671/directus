@@ -2,9 +2,11 @@
 
 namespace Directus\Filesystem;
 
+use Char0n\FFMpegPHP\Movie;
 use Directus\Application\Application;
 use function Directus\filename_put_ext;
 use function Directus\generate_uuid5;
+use function Directus\is_a_url;
 use Directus\Util\ArrayUtils;
 use Directus\Util\DateTimeUtils;
 use Directus\Util\Formatting;
@@ -33,7 +35,8 @@ class Files
     private $defaults = [
         'description' => '',
         'tags' => '',
-        'location' => ''
+        'location' => '',
+        'charset' => ''
     ];
 
     /**
@@ -103,7 +106,7 @@ class Files
             'height' => $fileData['height'],
             //    @TODO: Returns date in ISO 8601 Ex: 2016-06-06T17:18:20Z
             //    see: https://en.wikipedia.org/wiki/ISO_8601
-            'date_uploaded' => $fileData['date_uploaded'],// . ' UTC',
+            'date_uploaded' => $fileData['date_uploaded'], // . ' UTC',
             'storage' => $fileData['storage']
         ];
     }
@@ -254,26 +257,61 @@ class Files
      */
     public function saveData($fileData, $fileName, $replace = false)
     {
-        $fileData = base64_decode($this->getDataInfo($fileData)['data']);
-        $checksum = md5($fileData);
+        // When file is uploaded via multipart form data then We will get object of Slim\Http\UploadFile
+        // When file is uploaded via URL (Youtube, Vimeo, or image link) then we will get base64 encode string.
+        $size = null;
+        
+        $title = $fileName;
 
+        if (is_object($fileData)) {
+            $size = $fileData->getSize();
+            $checksum = hash_file('md5', $fileData->file);
+        } else {
+            $fileData = base64_decode($this->getDataInfo($fileData)['data']);
+            $checksum = md5($fileData);
+            $size = strlen($fileData);
+        }
         // @TODO: merge with upload()
         $fileName = $this->getFileName($fileName, $replace !== true);
 
         $filePath = $this->getConfig('root') . '/' . $fileName;
 
-        $this->emitter->run('file.save', ['name' => $fileName, 'size' => strlen($fileData)]);
+        $this->emitter->run('file.save', ['name' => $fileName, 'size' => $size]);
         $this->write($fileName, $fileData, $replace);
-        $this->emitter->run('file.save:after', ['name' => $fileName, 'size' => strlen($fileData)]);
+        $this->emitter->run('file.save:after', ['name' => $fileName, 'size' => $size]);
+
+        #open local tmp file since s3 bucket is private
+        $handle = fopen($fileData->file, 'rb');
+        $tmp = tempnam(sys_get_temp_dir(), $fileName);
+        file_put_contents($tmp, $handle);
 
         unset($fileData);
 
         $fileData = $this->getFileInfo($fileName);
-        $fileData['title'] = Formatting::fileNameToFileTitle($fileName);
+        $fileData['title'] = Formatting::fileNameToFileTitle($title);
         $fileData['filename'] = basename($filePath);
         $fileData['storage'] = $this->config['adapter'];
 
         $fileData = array_merge($this->defaults, $fileData);
+
+        # Updates for file meta data tags
+        if (strpos($fileData['type'],'video') !== false) {
+            #use ffprobe on local file, can't stream data to it or reference
+            $output = shell_exec("ffprobe {$tmp} -show_entries format=duration:stream=height,width -v quiet -of json");
+            #echo($output);
+            $media = json_decode($output);
+            $width = $media->streams[0]->width;
+            $height = $media->streams[0]->height;
+            $duration = $media->format->duration;   #seconds
+
+        } elseif (strpos($fileData['type'],'audio') !== false) {
+            $output = shell_exec("ffprobe {$tmp} -show_entries format=duration -v quiet -of json");
+            $media = json_decode($output);
+            $duration = $media->format->duration;
+        }
+
+        fclose($handle);
+        unset($tmpData);
 
         return [
             // The MIME type will be based on its extension, rather than its content
@@ -285,10 +323,11 @@ class Files
             'location' => $fileData['location'],
             'charset' => $fileData['charset'],
             'filesize' => $fileData['size'],
-            'width' => $fileData['width'],
-            'height' => $fileData['height'],
+            'width' => isset($width) ? $width : $fileData['width'],
+            'height' => isset($height) ? $width : $fileData['height'],
             'storage' => $fileData['storage'],
             'checksum' => $checksum,
+            'duration' => isset($duration) ? $duration : 0
         ];
     }
 
@@ -330,11 +369,36 @@ class Files
     {
         if ($outside === true) {
             $buffer = file_get_contents($path);
+            $fileData = $this->getFileInfoFromData($buffer);
         } else {
-            $buffer = $this->filesystem->getAdapter()->read($path);
+            $fileData = $this->getFileInfoFromPath($path);
         }
 
-        return $this->getFileInfoFromData($buffer);
+        return $fileData;
+    }
+
+    public function getFileInfoFromPath($path)
+    {
+        
+        $mime = $this->filesystem->getAdapter()->getMimetype($path);
+
+        $typeTokens = explode('/', $mime);
+
+        if ($typeTokens[0] == 'image') {
+            $buffer = $this->filesystem->getAdapter()->read($path);
+            $info = $this->getFileInfoFromData($buffer);
+        } else {
+            $size = $this->filesystem->getAdapter()->getSize($path);
+            $info = [
+                'type' => $mime,
+                'format' => $typeTokens[1],
+                'size' => $size,
+                'width' => null,
+                'height' => null
+            ];
+        }
+
+        return $info;
     }
 
     public function getFileInfoFromData($data)
@@ -498,7 +562,7 @@ class Files
         $this->emitter->run('file.save:after', ['name' => $targetName, 'size' => strlen($data)]);
 
         $fileData['name'] = basename($finalPath);
-        $fileData['date_uploaded'] = DateTimeUtils::nowInUTC()->toString();
+        $fileData['date_uploaded'] = DateTimeUtils::nowInTimezone()->toString();
         $fileData['storage'] = $this->config['adapter'];
 
         return $fileData;
@@ -513,9 +577,17 @@ class Files
      */
     private function sanitizeName($fileName)
     {
-        // do not start with dot
-        $fileName = preg_replace('/^\./', 'dot-', $fileName);
-        $fileName = str_replace(' ', '_', $fileName);
+        // Swap out Non "Letters" with a -
+        $fileName = preg_replace('/[^\\pL\d^\.]+/u', '-', $fileName);
+
+        // Trim out extra -'s
+        $fileName = trim($fileName, '-');
+
+        // Make text lowercase
+        $fileName = strtolower($fileName);
+
+        // Strip out anything we haven't been able to convert
+        $fileName = preg_replace('/[^-\w\.]+/', '', $fileName);
 
         return $fileName;
     }
@@ -551,7 +623,7 @@ class Files
 
             if (preg_match($trailingDigit, $fileName, $matches)) {
                 // Convert "fname-1.jpg" to "fname-2.jpg"
-                $attempt = 1 + (int)$matches[1];
+                $attempt = 1 + (int) $matches[1];
                 $newName = preg_replace(
                     $trailingDigit,
                     filename_put_ext("-{$attempt}", $ext),
@@ -628,5 +700,31 @@ class Files
         $ini += strlen($start);
         $len = strpos($string, $end, $ini) - $ini;
         return substr($string, $ini, $len);
+    }
+    /**
+     * Get a file size and type info from base64 data , URL ,multipart form data
+     * 
+     * @param string $data
+     *
+     * @return array file size and type
+     */
+    public function getFileSizeType($data)
+    {
+        $result=[];
+        if (is_a_url($data)) {
+            $dataInfo = $this->getLink($data);
+            $result['mimeType'] = isset($dataInfo['type']) ? $dataInfo['type'] : null;
+            $result['size'] = isset($dataInfo['filesize']) ? $dataInfo['filesize'] : (isset($dataInfo['size']) ? $dataInfo['size'] : null);
+        }else if(is_object($data)) {
+            $result['mimeType']=$data->getClientMediaType();
+            $result['size']=$data->getSize();
+        }else if(strpos($data, 'data:') === 0){
+            $parts = explode(',', $data);
+            $file = $parts[1];
+            $dataInfo = $this->getFileInfoFromData(base64_decode($file));
+            $result['mimeType'] = isset($dataInfo['type']) ? $dataInfo['type'] : null;
+            $result['size'] = isset($dataInfo['size']) ? $dataInfo['size'] : null;
+        }
+        return $result;
     }
 }

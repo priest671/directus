@@ -1,5 +1,9 @@
 <?php
 
+use Directus\Config\Context;
+use Directus\Config\Schema\Schema;
+use Directus\Exception\ErrorException;
+
 $basePath =  realpath(__DIR__ . '/../');
 
 require $basePath . '/vendor/autoload.php';
@@ -8,8 +12,10 @@ require $basePath . '/vendor/autoload.php';
 // If the server responds "pong" it means the rewriting works
 // NOTE: The API requires the default project to be configured to properly works
 //       It should work without the default project being configured
-if (!file_exists($basePath . '/config/api.php')) {
-    return \Directus\create_default_app($basePath);
+if (getenv("DIRECTUS_USE_ENV") !== "1") {
+    if (!file_exists($basePath . '/config/api.php')) {
+        return \Directus\create_default_app($basePath);
+    }
 }
 
 // Get Environment name
@@ -19,23 +25,42 @@ $projectName = \Directus\get_api_project_from_request();
 // Otherwise there's not way to tell which database to connect to
 // It returns 401 Unauthorized error to any endpoint except /server/ping
 if (!$projectName) {
-    return \Directus\create_unknown_project_app($basePath);
+    $schema = Schema::get();
+    if (getenv("DIRECTUS_USE_ENV") === "1") {
+        $configData = $schema->value(Context::from_env());
+    } else {
+        $configData = $schema->value([]);
+    }
+    return \Directus\create_unknown_project_app($basePath, $configData);
 }
 
-$configFilePath = \Directus\create_config_path($basePath, $projectName);
-if (!file_exists($configFilePath)) {
-    http_response_code(404);
+
+$maintenanceFlagPath = \Directus\create_maintenanceflag_path($basePath);
+if (file_exists($maintenanceFlagPath)) {
+    http_response_code(503);
     header('Content-Type: application/json');
     echo json_encode([
         'error' => [
-            'error' => 8,
-            'message' => 'API Environment Configuration Not Found: ' . $projectName
+            'code' => 21,
+            'message' => 'This API instance is currently down for maintenance. Please try again later.'
         ]
     ]);
     exit;
 }
 
-$app = \Directus\create_app($basePath, require $configFilePath);
+try {
+    $app = \Directus\create_app_with_project_name($basePath, $projectName);
+} catch (ErrorException $e) {
+    http_response_code($e->getStatusCode());
+    header('Content-Type: application/json');
+    echo json_encode([
+        'error' => [
+            'code' => $e->getCode(),
+            'message' => $e->getMessage()
+        ]
+    ]);
+    exit;
+}
 
 // ----------------------------------------------------------------------------
 //
@@ -67,8 +92,21 @@ date_default_timezone_set(\Directus\get_default_timezone());
 
 $container = $app->getContainer();
 
-\Directus\register_global_hooks($app);
-\Directus\register_extensions_hooks($app);
+try {
+    \Directus\register_global_hooks($app);
+    \Directus\register_extensions_hooks($app);
+} catch (ErrorException $e) {
+    http_response_code($e->getStatusCode());
+    header('Content-Type: application/json');
+    echo json_encode([
+        'error' => [
+            'code' => $e->getCode(),
+            'message' => $e->getMessage()
+        ]
+    ]);
+    exit;
+}
+
 
 $app->getContainer()->get('hook_emitter')->run('application.boot', $app);
 
@@ -196,7 +234,9 @@ $app->group('/{project}', function () use ($middleware) {
         foreach ($endpointsList as $name => $endpoints) {
             \Directus\create_group_route_from_array($this, $name, $endpoints);
         }
-    })->add($middleware['table_gateway']);
+    })
+        ->add($middleware['auth'])
+        ->add($middleware['table_gateway']);
 
     $this->group('/pages', function () {
         $endpointsList = \Directus\get_custom_endpoints('public/extensions/core/pages', true);
@@ -216,6 +256,12 @@ $app->group('/{project}', function () use ($middleware) {
             \Directus\create_group_route_from_array($this, $name, $endpoints);
         }
     })
+        ->add($middleware['rate_limit_user'])
+        ->add($middleware['auth'])
+        ->add($middleware['table_gateway']);
+
+    $this->group('/gql', \Directus\Api\Routes\GraphQL::class)
+        ->add($middleware['auth_admin'])
         ->add($middleware['rate_limit_user'])
         ->add($middleware['auth'])
         ->add($middleware['table_gateway']);

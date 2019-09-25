@@ -113,11 +113,11 @@ abstract class AbstractService
      *
      * @throws UnprocessableEntityException
      */
-    public function validate(array $data, array $constraints)
+    public function validate(array $data, array $constraints, $errorCode = "")
     {
         $constraintViolations = $this->getViolations($data, $constraints);
 
-        $this->throwErrorIfAny($constraintViolations);
+        $this->throwErrorIfAny($constraintViolations,$errorCode);
     }
 
     /**
@@ -150,10 +150,8 @@ abstract class AbstractService
             if (is_string($constraint)) {
                 $constraint = explode('|', $constraint);
             }
-
             $violations[$field] = $this->validator->validate(ArrayUtils::get($data, $field), $constraint);
         }
-
         return $violations;
     }
 
@@ -164,7 +162,7 @@ abstract class AbstractService
      *
      * @throws UnprocessableEntityException
      */
-    protected function throwErrorIfAny(array $violations)
+    protected function throwErrorIfAny(array $violations,$errorCode = "")
     {
         $results = [];
 
@@ -185,7 +183,7 @@ abstract class AbstractService
         }
 
         if (count($results) > 0) {
-            throw new InvalidRequestException(implode(' ', $results));
+            throw new InvalidRequestException(implode(' ', $results), $errorCode);
         }
     }
 
@@ -194,10 +192,11 @@ abstract class AbstractService
      *
      * @param string $collectionName
      * @param array $fields List of columns name
-     *
+     * @param array $skipRelatedCollectionField To skip parent collection field validation
+     * 
      * @return array
      */
-    protected function createConstraintFor($collectionName, array $fields = [])
+    protected function createConstraintFor($collectionName, array $fields = [], $skipRelatedCollectionField = '', array $params = [] )
     {
         /** @var SchemaManager $schemaManager */
         $schemaManager = $this->container->get('schema_manager');
@@ -210,9 +209,18 @@ abstract class AbstractService
         }
 
         foreach ($collectionObject->getFields($fields) as $field) {
+            //This condition is placed to skip alias validation field which is related to parent collection, 
+            //to avoid nested payload validation for O2M and M2O collections
+            if($field->hasRelationship() && !empty($skipRelatedCollectionField) && (($field->getRelationship()->isManyToOne() && $field->getRelationship()->getCollectionOne() == $skipRelatedCollectionField) || ($field->getRelationship()->isOneToMany() && $field->getRelationship()->getCollectionMany() == $skipRelatedCollectionField))) 
+                continue;
+            
             $columnConstraints = [];
 
             if ($field->hasAutoIncrement()) {
+                continue;
+            }
+
+            if ($field->getName() == "password" && isset($params['select_existing_or_update'])) {
                 continue;
             }
 
@@ -250,7 +258,6 @@ abstract class AbstractService
                 $constraints[$field->getName()] = $columnConstraints;
             }
         }
-
         return $constraints;
     }
 
@@ -358,10 +365,11 @@ abstract class AbstractService
      * @param array|null $fields
      * @param array $payload
      * @param array $params
-     *
+     * @param array $skipRelatedCollectionField To skip parent collection field validation
+     * 
      * @throws UnprocessableEntityException
      */
-    protected function validatePayload($collectionName, $fields, array $payload, array $params)
+    protected function validatePayload($collectionName, $fields, array $payload, array $params, $skipRelatedCollectionField = '')
     {
         $columnsToValidate = [];
 
@@ -372,13 +380,13 @@ abstract class AbstractService
         if (is_array($fields)) {
             $columnsToValidate = $fields;
         }
-
+      
         $this->validatePayloadFields($collectionName, $payload);
         // TODO: Ideally this should be part of the validator constraints
         // we need to accept options for the constraint builder
         $this->validatePayloadWithFieldsValidation($collectionName, $payload);
-
-        $this->validate($payload, $this->createConstraintFor($collectionName, $columnsToValidate));
+       
+        $this->validate($payload, $this->createConstraintFor($collectionName, $columnsToValidate, $skipRelatedCollectionField,$params));
     }
 
     /**
@@ -446,6 +454,8 @@ abstract class AbstractService
                 continue;
             }
 
+            $this->validateFieldLength($field, $value);
+            
             if ($validation = $field->getValidation()) {
                 $isCustomValidation = \Directus\is_custom_validation($validation);
 
@@ -468,6 +478,43 @@ abstract class AbstractService
         }
 
         $this->throwErrorIfAny($violations);
+    }
+
+    /**
+     * To validate the length of input with the DB.
+     * 
+     * @param array $field
+     * @param string $value
+     * 
+     * @throws UnprocessableEntityException
+     */
+    protected function validateFieldLength($field, $value)
+    {
+        if ($field->hasRelationship()) {
+            return;
+        }
+
+        if($field->getType() == "decimal"){
+            $precision = $field->getPrecision();
+            $scale = $field->getScale();
+            $number = $precision - $scale;
+            $input = explode(".",$value);
+            $inputLengthScale = isset($input[1]) ? strlen($input[1]) : 0;
+            $inputLengthNumber = isset($input[0]) ? strlen($input[0]) : 0;
+            $inputLengthPrecision = $inputLengthScale+$inputLengthNumber;
+
+            if($inputLengthNumber > $number || $inputLengthScale > $scale){
+                throw new UnprocessableEntityException(
+                    sprintf("The value submitted (%s) for '%s' is longer than the field's supported length (%s). Please submit a shorter value or ask an Admin to increase the length.",$value,$field->getFormatisedName(),$field['length'])
+                );
+            }
+        }else{
+            if(!is_null($field['length']) && ((is_array($value) && $field['length'] < strlen(json_encode($value))) || (!is_array($value) && $field['length'] < strlen($value)))){
+                throw new UnprocessableEntityException(
+                    sprintf("The value submitted (%s) for '%s' is longer than the field's supported length (%s). Please submit a shorter value or ask an Admin to increase the length.",!is_array($value) ? $value : 'Json / Array',$field->getFormatisedName(),$field['length'])
+                );
+            }
+        }
     }
 
     /**

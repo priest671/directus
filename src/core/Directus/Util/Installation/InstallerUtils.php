@@ -683,60 +683,8 @@ class InstallerUtils
                 'value' => isset($data['project_name']) ? $data['project_name'] : 'Directus'
             ],
             [
-                'key' => 'project_url',
-                'value' => ''
-            ],
-            [
                 'key' => 'app_url',
                 'value' => isset($data['app_url']) ? $data['app_url'] : ''
-            ],
-            [
-                'key' => 'logo',
-                'value' => ''
-            ],
-            [
-                'key' => 'color',
-                'value' => 'light-blue-600'
-            ],
-            [
-                'key' => 'default_limit',
-                'value' => '200'
-            ],
-            [
-                'key' => 'sort_null_last',
-                'value' => 1
-            ],
-            [
-                'key' => 'auto_sign_out',
-                'value' => '60'
-            ],
-            [
-                'key' => 'youtube_api_key',
-                'value' => ''
-            ],
-            [
-                'key' => 'trusted_proxies',
-                'value' => ''
-            ],
-            [
-                'key' => 'thumbnail_dimensions',
-                'value' => '200x200'
-            ],
-            [
-                'key' => 'thumbnail_quality_tags',
-                'value' => '{"poor": 25, "good": 50, "better":  75, "best": 100}'
-            ],
-            [
-                'key' => 'thumbnail_actions',
-                'value' => '{"contain":{"options":{"resizeCanvas":false,"position":"center","resizeRelative":false,"canvasBackground":"ccc"}},"crop":{"options":{"position":"center"}}}'
-            ],
-            [
-                'key' => 'thumbnail_cache_ttl',
-                'value' => '86400'
-            ],
-            [
-                'key' => 'thumbnail_not_found_location',
-                'value' => ''
             ],
         ];
     }
@@ -932,7 +880,7 @@ class InstallerUtils
     private static function createConfigData(array $data)
     {
         $corsEnabled = ArrayUtils::get($data, 'cors_enabled', true);
-        $authSecret = ArrayUtils::get($data, 'auth_secret', StringUtils::randomString(32));
+        $authSecret = ArrayUtils::get($data, 'auth_secret', StringUtils::randomString(32, false));
         $authPublic = ArrayUtils::get($data, 'auth_public', generate_uuid4());
 
         return ArrayUtils::defaults([
@@ -943,9 +891,10 @@ class InstallerUtils
             'db_password' => null,
             'db_socket' => '',
             'mail_from' => 'admin@example.com',
-            'feedback_token' => sha1(gmdate('U') . StringUtils::randomString(32)),
+            'feedback_token' => sha1(gmdate('U') . StringUtils::randomString(32, false)),
             'feedback_login' => true,
             'timezone' => get_default_timezone(),
+            'logs_path' => __DIR__ . '/../../../../../logs',
             'cache' => [
                 'enabled' => false,
                 'response_ttl' => 3600,
@@ -972,7 +921,7 @@ class InstallerUtils
                 ],
                 'headers' => [],
                 'exposed_headers' => [],
-                'max_age' => null,
+                'max_age' => 600,
                 'credentials' => false,
             ],
             'rate_limit' => [
