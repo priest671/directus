@@ -24,6 +24,9 @@ use PragmaRX\Google2FA\Google2FA;
 use Zend\Db\Sql\Delete;
 use Zend\Db\Sql\Select;
 use function Directus\get_directus_setting;
+use Directus\Validator\Exception\InvalidRequestException;
+use Zend\Db\TableGateway\TableGateway;
+use Directus\Exception\UnauthorizedException;
 
 class UsersService extends AbstractService
 {
@@ -65,8 +68,8 @@ class UsersService extends AbstractService
         $this->validatePayload($this->collection, array_keys($payload), $payload, $params);
 
         $passwordValidation = get_directus_setting('password_policy');
-        if(!empty($passwordValidation)){
-            $this->validate($payload,[static::PASSWORD_FIELD => ['regex:'.$passwordValidation ]]);
+        if (!empty($passwordValidation)) {
+            $this->validate($payload, [static::PASSWORD_FIELD => ['regex:' . $passwordValidation]]);
         }
 
         $this->checkItemExists($this->collection, $id);
@@ -85,7 +88,7 @@ class UsersService extends AbstractService
         );
         $newRecord = $tableGateway->updateRecord($id, $payload, $this->getCRUDParams($params));
 
-        if(!is_null(ArrayUtils::get($payload, $status->getName()))){
+        if (!is_null(ArrayUtils::get($payload, $status->getName()))) {
             $activityTableGateway = $this->createTableGateway(SchemaManager::COLLECTION_ACTIVITY);
             $activityTableGateway->recordAction(
                 $id,
@@ -138,11 +141,18 @@ class UsersService extends AbstractService
 
     public function findByIds($id, array $params = [])
     {
-        return $this->itemsService->findByIds(
-            $this->collection,
-            $this->getUserId($id),
-            $params
-        );
+        try {
+            return $this->itemsService->findByIds(
+                $this->collection,
+                $this->getUserId($id),
+                $params
+            );
+        } catch (\Exception $e) {
+            if ($e->getCode() == 203 && $id == "me") {
+                throw new UnauthorizedException('Unauthorized request');
+            }
+            throw $e;
+        }
     }
 
     public function findOne(array $params = [])
@@ -242,7 +252,7 @@ class UsersService extends AbstractService
         if (!$user) {
             /** @var Provider $auth */
             $auth = $this->container->get('auth');
-            $datetime = DateTimeUtils::nowInTimezone();
+            $datetime = DateTimeUtils::nowInUTC();
             $invitationToken = $auth->generateInvitationToken([
                 'date' => $datetime->toString(),
                 'exp' => $datetime->inDays(30)->getTimestamp(),
@@ -352,20 +362,18 @@ class UsersService extends AbstractService
      */
     protected function isLastAdmin($id)
     {
-        $result = $this->createTableGateway(SchemaManager::COLLECTION_USER_ROLES, false)->fetchAll(function (Select $select) use ($id) {
-            $select->columns(['role']);
-            $select->where(['role' => 1]);
-            $on = sprintf('%s.id = %s.user', SchemaManager::COLLECTION_USERS, SchemaManager::COLLECTION_USER_ROLES);
-            $select->join(SchemaManager::COLLECTION_USERS, $on, ['user' => 'id']);
-        });
+        $result = $this->createTableGateway(SchemaManager::COLLECTION_USERS, false)->fetchAll(function (Select $select) use ($id) {
+            $select->columns(['id']);
+            $select->where(['role' => 1 , 'status' =>  DirectusUsersTableGateway::STATUS_ACTIVE]);
+        })->toArray();
 
         $usersIds = [];
-        while ($result->valid()) {
-            $item = $result->current();
-            $usersIds[] = $item['user'];
-            $result->next();
+        if(count($result) > 0) {
+            foreach ($result as $key => $value) {
+                ArrayUtils::push($usersIds,$value['id']);
+            }
         }
-
+        
         return in_array($id, $usersIds) && count($usersIds) === 1;
     }
 
@@ -381,16 +389,26 @@ class UsersService extends AbstractService
     public function has2FAEnforced($id)
     {
         try {
-            $result = $this->createTableGateway(SchemaManager::COLLECTION_ROLES, false)->fetchAll(function (Select $select) use ($id) {
-                $select->columns(['enforce_2fa']);
-                $select->where(['user' => $id]);
-                $on = sprintf('%s.role = %s.id', SchemaManager::COLLECTION_USER_ROLES, SchemaManager::COLLECTION_ROLES);
-                $select->join(SchemaManager::COLLECTION_USER_ROLES, $on, ['id' => 'role']);
-            });
+            $dbConnection = $this->container->get('database');
+            $tableGateway = new TableGateway(SchemaManager::COLLECTION_ROLES, $dbConnection);
+            $select = new Select(['r' => SchemaManager::COLLECTION_ROLES]);
+            $select->columns(['enforce_2fa']);
 
-            $enforce_2fa = $result->current()['enforce_2fa'];
+            $subSelect = new Select(['ur' => 'directus_users']);
+            $subSelect->where->equalTo('ur.id', $id);
+            $subSelect->limit(1);
 
-            if ($enforce_2fa == null || $enforce_2fa == 0) {
+            $select->join(
+                ['ur' => $subSelect],
+                'r.id = ur.role',
+                [
+                    'role'
+                ]
+            );
+
+            $result = $tableGateway->selectWith($select)->current()['enforce_2fa'];
+
+            if (empty($result)) {
                 return false;
             } else {
                 return true;
@@ -428,16 +446,132 @@ class UsersService extends AbstractService
     public function activate2FA($id, $tfa_secret, $otp)
     {
         $this->validate(
-            ['tfa_secret' => $tfa_secret, 'otp' => $otp],
-            ['tfa_secret' => 'required|string', 'otp' => 'required|string']
+            ['2fa_secret' => $tfa_secret, 'otp' => $otp],
+            ['2fa_secret' => 'required|string', 'otp' => 'required|string']
         );
 
         $ga = new Google2FA();
 
-        if (!$ga->verifyKey($tfa_secret, $otp, 2)){
+        if (!$ga->verifyKey($tfa_secret, $otp, 2)) {
             throw new InvalidOTPException();
         }
 
         return $this->update($id, ['2fa_secret' => $tfa_secret]);
+    }
+
+    /**
+     * @param $collection
+     * @param array $items
+     * @param array $params
+     *
+     * @return array
+     *
+     * @throws InvalidRequestException
+     */
+    public function batchCreate(array $items, array $params = [])
+    {
+        if (!isset($items[0]) || !is_array($items[0])) {
+            throw new InvalidRequestException('batch create expect an array of items');
+        }
+
+        foreach ($items as $data) {
+            $this->enforceCreatePermissions($this->collection, $data, $params);
+            $this->validatePayload($this->collection, null, $data, $params);
+        }
+
+        $allItems = [];
+        foreach ($items as $data) {
+            $item = $this->create($data, $params);
+            if (!is_null($item)) {
+                $allItems[] = $item['data'];
+            }
+        }
+
+        if (!empty($allItems)) {
+            $allItems = ['data' => $allItems];
+        }
+
+        return $allItems;
+    }
+
+    /**
+     * @param $collection
+     * @param array $items
+     * @param array $params
+     *
+     * @return array
+     *
+     * @throws InvalidRequestException
+     */
+    public function batchUpdate(array $items, array $params = [])
+    {
+        if (!isset($items[0]) || !is_array($items[0])) {
+            throw new InvalidRequestException('batch update expect an array of items');
+        }
+
+        foreach ($items as $data) {
+            $this->enforceCreatePermissions($this->collection, $data, $params);
+            $this->validatePayload($this->collection, array_keys($data), $data, $params);
+            $this->validatePayloadHasPrimaryKey($this->collection, $data);
+        }
+
+        $collectionObject = $this->getSchemaManager()->getCollection($this->collection);
+        $allItems = [];
+        foreach ($items as $data) {
+            $id = $data[$collectionObject->getPrimaryKeyName()];
+            $item = $this->update($id, $data, $params);
+
+            if (!is_null($item)) {
+                $allItems[] = $item['data'];
+            }
+        }
+
+        if (!empty($allItems)) {
+            $allItems = ['data' => $allItems];
+        }
+
+        return $allItems;
+    }
+
+    /**
+     * @param $collection
+     * @param array $ids
+     * @param array $payload
+     * @param array $params
+     *
+     * @return array
+     */
+    public function batchUpdateWithIds(array $ids, array $payload, array $params = [])
+    {
+        $this->enforceUpdatePermissions($this->collection, $payload, $params);
+        $this->validatePayload($this->collection, array_keys($payload), $payload, $params);
+
+        $allItems = [];
+        foreach ($ids as $id) {
+            $item = $this->update($id, $payload, $params);
+            if (!empty($item)) {
+                $allItems[] = $item['data'];
+            }
+        }
+
+        if (!empty($allItems)) {
+            $allItems = ['data' => $allItems];
+        }
+
+        return $allItems;
+    }
+
+    /**
+     * @param $collection
+     * @param array $ids
+     * @param array $params
+     *
+     * @throws ForbiddenException
+     */
+    public function batchDeleteWithIds(array $ids, array $params = [])
+    {
+        foreach ($ids as $id) {
+            $this->delete($id, $params);
+        }
     }
 }

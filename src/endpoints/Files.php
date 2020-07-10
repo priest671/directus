@@ -10,7 +10,6 @@ use Directus\Database\Schema\SchemaManager;
 use Directus\Exception\BatchUploadNotAllowedException;
 use Directus\Exception\Exception;
 use Directus\Filesystem\Exception\FailedUploadException;
-use function Directus\regex_numeric_ids;
 use Directus\Services\FilesServices;
 use Directus\Services\RevisionsService;
 use Directus\Util\ArrayUtils;
@@ -25,21 +24,11 @@ class Files extends Route
     public function __invoke(Application $app)
     {
         $app->post('', [$this, 'create']);
-        $app->get('/{id:' . regex_numeric_ids() . '}', [$this, 'read']);
-        $app->patch('/{id:' . regex_numeric_ids() . '}', [$this, 'update']);
+        $app->get('/{id}', [$this, 'read']);
+        $app->patch('/{id}', [$this, 'update']);
         $app->patch('', [$this, 'update']);
-        $app->delete('/{id:' . regex_numeric_ids() . '}', [$this, 'delete']);
+        $app->delete('/{id}', [$this, 'delete']);
         $app->get('', [$this, 'all']);
-
-        // Folders
-        $controller = $this;
-        $app->group('/folders', function () use ($controller) {
-            $this->post('', [$controller, 'createFolder']);
-            $this->get('/{id:[0-9]+}', [$controller, 'readFolder']);
-            $this->patch('/{id:[0-9]+}', [$controller, 'updateFolder']);
-            $this->delete('/{id:[0-9]+}', [$controller, 'deleteFolder']);
-            $this->get('', [$controller, 'allFolder']);
-        });
 
         // Revisions
         $app->get('/{id}/revisions', [$this, 'fileRevisions']);
@@ -74,7 +63,8 @@ class Files extends Route
 
             // TODO: the file already exists move it to the upload path location
             $payload = array_merge([
-                'filename' => $uploadedFile->getClientFilename(),
+                'filename_disk' => $uploadedFile->getClientFilename(),
+                'filename_download' => $uploadedFile->getClientFilename(),
                 'data' => $uploadedFile,
             ], $payload);
         }
@@ -83,6 +73,13 @@ class Files extends Route
             $payload,
             $request->getQueryParams()
         );
+
+        // You can move place this define statement in other files if you're investigating
+        // memory usage and trying to nail down where it's coming from (you'll be able to
+        // see the memory usage at the point of the define() in the X-Memory-Usage response
+        // header).
+        //define('X_MEM_USAGE', memory_get_peak_usage(true));
+        //$response = $response->withHeader('X-Memory-Usage', X_MEM_USAGE);
 
         return $this->responseWithData($request, $response, $responseData);
     }
@@ -130,7 +127,6 @@ class Files extends Route
             $request->getParsedBody(),
             $request->getQueryParams()
         );
-
         return $this->responseWithData($request, $response, $responseData);
     }
 
@@ -162,93 +158,6 @@ class Files extends Route
         $responseData = $service->findAll($request->getQueryParams());
 
         return $this->responseWithData($request, $response, $responseData);
-    }
-
-    /**
-     * @param Request $request
-     * @param Response $response
-     *
-     * @return Response
-     */
-    public function createFolder(Request $request, Response $response)
-    {
-        $this->validateRequestPayload($request);
-        $service = new FilesServices($this->container);
-        $responseData = $service->createFolder(
-            $request->getParsedBody(),
-            $request->getQueryParams()
-        );
-
-        return $this->responseWithData($request, $response, $responseData);
-    }
-
-    /**
-     * @param Request $request
-     * @param Response $response
-     *
-     * @return Response
-     */
-    public function readFolder(Request $request, Response $response)
-    {
-        $service = new FilesServices($this->container);
-        $responseData = $service->findFolderByIds(
-            $request->getAttribute('id'),
-            ArrayUtils::pick($request->getQueryParams(), ['fields', 'meta'])
-        );
-
-        return $this->responseWithData($request, $response, $responseData);
-    }
-
-    /**
-     * @param Request $request
-     * @param Response $response
-     *
-     * @return Response
-     */
-    public function updateFolder(Request $request, Response $response)
-    {
-        $this->validateRequestPayload($request);
-        $service = new FilesServices($this->container);
-        $responseData = $service->updateFolder(
-            $request->getAttribute('id'),
-            $request->getParsedBody(),
-            $request->getQueryParams()
-        );
-
-        return $this->responseWithData($request, $response, $responseData);
-    }
-
-    /**
-     * @param Request $request
-     * @param Response $response
-     *
-     * @return Response
-     */
-    public function allFolder(Request $request, Response $response)
-    {
-        $service = new FilesServices($this->container);
-        $responseData = $service->findAllFolders(
-            $request->getQueryParams()
-        );
-
-        return $this->responseWithData($request, $response, $responseData);
-    }
-
-    /**
-     * @param Request $request
-     * @param Response $response
-     *
-     * @return Response
-     */
-    public function deleteFolder(Request $request, Response $response)
-    {
-        $service = new FilesServices($this->container);
-        $service->deleteFolder(
-            $request->getAttribute('id'),
-            $request->getQueryParams()
-        );
-
-        return $this->responseWithData($request, $response, []);
     }
 
     /**

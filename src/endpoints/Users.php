@@ -37,7 +37,7 @@ class Users extends Route
         $app->patch('/{id}/tracking/page', [$this, 'trackPage']);
 
         // Enable 2FA
-        $app->post('/{id}/activate2FA', [$this, 'activate2FA']);
+        $app->post('/{id}/activate_2fa', [$this, 'activate2FA']);
     }
 
     /**
@@ -65,9 +65,13 @@ class Users extends Route
     public function create(Request $request, Response $response)
     {
         $this->validateRequestPayload($request);
+        $payload = $request->getParsedBody();
+        if (isset($payload[0]) && is_array($payload[0])) {
+            return $this->batch($request, $response);
+        }
         $service = new UsersService($this->container);
         $responseData = $service->create(
-            $request->getParsedBody(),
+            $payload,
             $request->getQueryParams()
         );
 
@@ -120,9 +124,21 @@ class Users extends Route
     {
         $this->validateRequestPayload($request);
         $service = new UsersService($this->container);
+
+        $payload = $request->getParsedBody();
+        if (isset($payload[0]) && is_array($payload[0])) {
+            return $this->batch($request, $response);
+        }
+
+        $id = $request->getAttribute('id');
+
+        if (strpos($id, ',') !== false) {
+            return $this->batch($request, $response);
+        }
+
         $responseData = $service->update(
-            $request->getAttribute('id'),
-            $request->getParsedBody(),
+            $id,
+            $payload,
             $request->getQueryParams()
         );
 
@@ -138,13 +154,53 @@ class Users extends Route
     public function delete(Request $request, Response $response)
     {
         $service = new UsersService($this->container);
+
+        $id = $request->getAttribute('id');
+        if (strpos($id, ',') !== false) {
+            return $this->batch($request, $response);
+        }
+
         $service->delete(
-            $request->getAttribute('id'),
+            $id,
             $request->getQueryParams()
         );
 
         return $this->responseWithData($request, $response, []);
     }
+
+    /**
+     * @param Request $request
+     * @param Response $response
+     *
+     * @return Response
+     *
+     * @throws \Exception
+     */
+    protected function batch(Request $request, Response $response)
+    {
+        $service = new UsersService($this->container);
+
+        $payload = $request->getParsedBody();
+        $params = $request->getQueryParams();
+
+        $responseData = null;
+        if ($request->isPost()) {
+            $responseData = $service->batchCreate($payload, $params);
+        } else if ($request->isPatch()) {
+            if ($request->getAttribute('id')) {
+                $ids = explode(',', $request->getAttribute('id'));
+                $responseData = $service->batchUpdateWithIds( $ids, $payload, $params);
+            } else {
+                $responseData = $service->batchUpdate($payload, $params);
+            }
+        } else if ($request->isDelete()) {
+            $ids = explode(',', $request->getAttribute('id'));
+            $service->batchDeleteWithIds($ids, $params);
+        }
+
+        return $this->responseWithData($request, $response, $responseData);
+    }
+
 
     /**
      * @param Request $request
@@ -230,7 +286,7 @@ class Users extends Route
         $service = new UsersService($this->container);
         $responseData = $service->activate2FA(
             $request->getAttribute('id'),
-            $request->getParsedBodyParam('tfa_secret'),
+            $request->getParsedBodyParam('2fa_secret'),
             $request->getParsedBodyParam('otp')
         );
 

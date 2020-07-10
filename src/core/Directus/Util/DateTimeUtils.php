@@ -83,7 +83,7 @@ class DateTimeUtils extends \DateTime
         if ($timezone) {
             $timezone = $this->createTimeZone($timezone);
         }
-        
+
         parent::__construct($time, $timezone);
         if ($time === null) {
             $this->setTimestamp(time());
@@ -105,12 +105,6 @@ class DateTimeUtils extends \DateTime
     public static function nowInUTC()
     {
         return static::now('UTC');
-    }
-
-    public static function nowInTimezone()
-    {
-        $config = get_project_config();;
-        return static::now($config->get('app.timezone'));
     }
 
     /**
@@ -182,11 +176,11 @@ class DateTimeUtils extends \DateTime
         if ($timezone instanceof DateTimeZone) {
             return $timezone;
         }
-        
+
         if ($timezone === null) {
             return new DateTimeZone(date_default_timezone_get());
         }
-        
+
         try {
             $timezone = new DateTimeZone($timezone);
         } catch (\Exception $e) {
@@ -287,6 +281,9 @@ class DateTimeUtils extends \DateTime
         return $this->format('c');
     }
 
+    public function toRFC2616Format() {
+        return $this->format('D, d M Y H:i:s T');
+    }
     /**
      * Returns a string format of the datetime
      *

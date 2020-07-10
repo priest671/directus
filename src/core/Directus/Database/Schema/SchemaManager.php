@@ -15,7 +15,6 @@ class SchemaManager
 {
     // Tables
     const COLLECTION_ACTIVITY            = 'directus_activity';
-    const COLLECTION_ACTIVITY_SEEN       = 'directus_activity_seen';
     const COLLECTION_COLLECTIONS         = 'directus_collections';
     const COLLECTION_COLLECTION_PRESETS  = 'directus_collection_presets';
     const COLLECTION_FIELDS              = 'directus_fields';
@@ -27,8 +26,9 @@ class SchemaManager
     const COLLECTION_RELATIONS           = 'directus_relations';
     const COLLECTION_REVISIONS           = 'directus_revisions';
     const COLLECTION_SETTINGS            = 'directus_settings';
-    const COLLECTION_USER_ROLES          = 'directus_user_roles';
     const COLLECTION_USERS               = 'directus_users';
+    const COLLECTION_WEBHOOKS            = 'directus_webhooks';
+    const COLLECTION_USER_SESSIONS       = 'directus_user_sessions';
 
     /**
      * Schema source instance
@@ -73,6 +73,21 @@ class SchemaManager
         'settings',
         'user_roles',
         'users'
+    ];
+
+     /**
+     * Data types that don't require length. See https://dev.mysql.com/doc/refman/8.0/en/string-type-syntax.html
+     * @var array
+     */
+    protected $noLengthDataTypes = [        
+        'TEXT',
+        'TINYTEXT',
+        'MEDIUMTEXT',
+        'LONGTEXT',
+        'BLOB',
+        'TINYBLOB',
+        'MEDIUMBLOB',
+        'LONGBLOB'
     ];
 
     public function __construct(SchemaInterface $source)
@@ -492,7 +507,6 @@ class SchemaManager
     {
         return [
             static::COLLECTION_ACTIVITY,
-            static::COLLECTION_ACTIVITY_SEEN,
             static::COLLECTION_COLLECTIONS,
             static::COLLECTION_COLLECTION_PRESETS,
             static::COLLECTION_FIELDS,
@@ -504,8 +518,9 @@ class SchemaManager
             static::COLLECTION_RELATIONS,
             static::COLLECTION_REVISIONS,
             static::COLLECTION_SETTINGS,
-            static::COLLECTION_USER_ROLES,
-            static::COLLECTION_USERS
+            static::COLLECTION_USERS,
+            static::COLLECTION_WEBHOOKS,
+            static::COLLECTION_USER_SESSIONS
         ];
     }
 
@@ -556,12 +571,14 @@ class SchemaManager
         // NOTE: Alias column must are nullable
         if (DataTypes::isAliasType($fieldType)) {
             $column['nullable'] = true;
-        }
-
+        }        
+                
         if ($this->isFloatingPointType($dataType)) {
             $column['length'] = sprintf('%d,%d', $column['precision'], $column['scale']);
         } else if ($this->source->isIntegerType($dataType)) {
             $column['length'] = $column['precision'];
+        } else if (in_array($dataType, $this->noLengthDataTypes)) {
+            $column['length'] = null;        
         } else {
             $column['length'] = $column['char_length'];
         }
@@ -789,7 +806,7 @@ class SchemaManager
         // save the column into the data
         // @NOTE: this is the early implementation of cache
         // soon this will be change to cache
-        $this->data['tables'][$name] = $schema;
+        $this->data['collections'][$name] = $schema;
     }
 
     protected function addField(Field $column)
